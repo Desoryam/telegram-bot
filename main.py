@@ -62,7 +62,7 @@ def channel_keyboard():
     keyboard = [
         [
             InlineKeyboardButton(
-                text="📢 Join Our Telegram Channel",
+                text="📢 Join for exclusive content",
                 url=CHANNEL_URL
             )
         ]
@@ -117,7 +117,7 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def more_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    text = db.get_setting("next_message")
+    text = db.get_setting("more_message")
 
     await update.message.reply_text(
         text=text,

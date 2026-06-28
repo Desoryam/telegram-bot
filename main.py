@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+
 from datetime import time
 
 from dotenv import load_dotenv
@@ -19,51 +20,62 @@ from telegram.ext import (
     filters,
 )
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
 from database import db
 
 
-# -------------------------
+# --------------------------------
 # Load Environment Variables
-# -------------------------
+# --------------------------------
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
+
 CHANNEL_URL = os.getenv("CHANNEL_URL")
 
 BROADCAST_HOUR = int(os.getenv("BROADCAST_HOUR", 21))
 BROADCAST_MINUTE = int(os.getenv("BROADCAST_MINUTE", 0))
 
 
-# -------------------------
+# --------------------------------
 # Logging
-# -------------------------
+# --------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("bot.log"),
-        logging.StreamHandler()
-    ]
+        logging.StreamHandler(),
+    ],
 )
 
 logger = logging.getLogger(__name__)
 
 
-# -------------------------
-# Join Channel Button
-# -------------------------
+# --------------------------------
+# Helpers
+# --------------------------------
 
-def channel_keyboard():
+def is_admin(user_id: int):
+    return user_id == ADMIN_ID
+
+
+async def unauthorized(update: Update):
+    await update.message.reply_text(
+        "❌ You are not authorized."
+    )
+
+
+def channel_button():
+
     keyboard = [
         [
             InlineKeyboardButton(
-                text="📢 Join for exclusive content",
-                url=CHANNEL_URL
+                "📢 Join for more exclusive content",
+                url=CHANNEL_URL,
             )
         ]
     ]
@@ -71,35 +83,19 @@ def channel_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 
-# -------------------------
-# Helper
-# -------------------------
-
-def is_admin(user_id: int):
-    return user_id == ADMIN_ID
-
-
-async def admin_only(update: Update):
-    await update.message.reply_text(
-        "❌ You are not authorized."
-    )
-
-
-# -------------------------
+# --------------------------------
 # User Commands
-# -------------------------
+# --------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    chat_id = update.effective_chat.id
-
-    db.add_user(chat_id)
+    db.add_user(update.effective_chat.id)
 
     text = db.get_setting("start_message")
 
     await update.message.reply_text(
         text=text,
-        reply_markup=channel_keyboard(),
+        reply_markup=channel_button(),
         disable_web_page_preview=False,
     )
 
@@ -110,30 +106,30 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         text=text,
-        reply_markup=channel_keyboard(),
+        reply_markup=channel_button(),
         disable_web_page_preview=False,
     )
 
 
 async def more_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    text = db.get_setting("more_message")
+    text = db.get_setting("next_message")
 
     await update.message.reply_text(
         text=text,
-        reply_markup=channel_keyboard(),
+        reply_markup=channel_button(),
         disable_web_page_preview=False,
     )
 
 
-# -------------------------
+# --------------------------------
 # Admin Commands
-# -------------------------
+# --------------------------------
 
 async def set_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_admin(update.effective_user.id):
-        return await admin_only(update)
+        return await unauthorized(update)
 
     if not update.message.reply_to_message:
         return await update.message.reply_text(
@@ -147,7 +143,10 @@ async def set_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "The replied message has no text."
         )
 
-    db.set_setting("start_message", text)
+    db.set_setting(
+        "start_message",
+        text,
+    )
 
     await update.message.reply_text(
         "✅ Start message updated."
@@ -157,7 +156,7 @@ async def set_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_admin(update.effective_user.id):
-        return await admin_only(update)
+        return await unauthorized(update)
 
     if not update.message.reply_to_message:
         return await update.message.reply_text(
@@ -168,18 +167,21 @@ async def set_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not text:
         return await update.message.reply_text(
-            "The replied message has no text."
-        )
+    "The replied message has no text."
+)
 
-    db.set_setting("next_message", text)
+    db.set_setting(
+        "next_message",
+        text,
+    )
 
     await update.message.reply_text(
         "✅ Next message updated."
     )
 
-# -------------------------
+# --------------------------------
 # Broadcast Functions
-# -------------------------
+# --------------------------------
 
 async def broadcast_message(application: Application):
 
@@ -187,13 +189,12 @@ async def broadcast_message(application: Application):
 
     users = db.get_all_users()
 
-    logger.info(f"Broadcast started. Users: {len(users)}")
+    logger.info(f"Broadcast started for {len(users)} users.")
 
     success = 0
     failed = 0
 
-    # Send in batches to avoid hitting Telegram rate limits
-    batch_size = 30
+    batch_size = 25
 
     for i in range(0, len(users), batch_size):
 
@@ -202,53 +203,63 @@ async def broadcast_message(application: Application):
         tasks = []
 
         for chat_id in batch:
+
             tasks.append(
+
                 application.bot.send_message(
+
                     chat_id=chat_id,
                     text=text,
-                    reply_markup=channel_keyboard(),
+                    reply_markup=channel_button(),
                     disable_web_page_preview=False,
+
                 )
+
             )
 
         results = await asyncio.gather(
             *tasks,
-            return_exceptions=True
+            return_exceptions=True,
         )
 
         for result in results:
 
             if isinstance(result, Exception):
-                failed += 1
+
                 logger.warning(result)
+                failed += 1
+
             else:
+
                 success += 1
 
-        # Small delay between batches
+        # Prevent Telegram flood limits
         await asyncio.sleep(1)
 
     logger.info(
-        f"Broadcast Finished | Success={success} Failed={failed}"
+        f"Broadcast completed | Success={success} Failed={failed}"
     )
 
 
-# -------------------------
-# Scheduler Wrapper
-# -------------------------
+# --------------------------------
+# JobQueue Daily Broadcast
+# --------------------------------
 
-async def scheduled_broadcast(application: Application):
+async def daily_broadcast(context: ContextTypes.DEFAULT_TYPE):
+
     logger.info("Running scheduled broadcast...")
-    await broadcast_message(application)
+
+    await broadcast_message(context.application)
 
 
-# -------------------------
+# --------------------------------
 # Admin Commands
-# -------------------------
+# --------------------------------
 
 async def set_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_admin(update.effective_user.id):
-        return await admin_only(update)
+        return await unauthorized(update)
 
     if not update.message.reply_to_message:
         return await update.message.reply_text(
@@ -262,7 +273,10 @@ async def set_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "The replied message has no text."
         )
 
-    db.set_setting("broadcast_message", text)
+    db.set_setting(
+        "broadcast_message",
+        text,
+    )
 
     await update.message.reply_text(
         "✅ Broadcast updated."
@@ -272,8 +286,8 @@ async def set_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def broadcast_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_admin(update.effective_user.id):
-        return await admin_only(update)
-
+        return await unauthorized(update)
+    
     await update.message.reply_text(
         "📢 Starting broadcast..."
     )
@@ -281,66 +295,48 @@ async def broadcast_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await broadcast_message(context.application)
 
     await update.message.reply_text(
-        "✅ Broadcast completed."
+        "✅ Broadcast finished."
     )
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_admin(update.effective_user.id):
-        return await admin_only(update)
+        return await unauthorized(update)
 
-    users = db.get_user_count()
+    count = db.get_user_count()
 
     await update.message.reply_text(
-        f"👥 Total Users: {users}"
+
+        f"👥 Total Users: {count}"
+
     )
 
 
-# -------------------------
+# --------------------------------
 # Ignore Everything Else
-# -------------------------
+# --------------------------------
 
 async def ignore(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return
 
-
-# -------------------------
-# Scheduler
-# -------------------------
-
-scheduler = AsyncIOScheduler()
-
-
-def start_scheduler(application: Application):
-
-    scheduler.add_job(
-        scheduled_broadcast,
-        trigger="cron",
-        hour=BROADCAST_HOUR,
-        minute=BROADCAST_MINUTE,
-        args=[application],
-    )
-
-    scheduler.start()
-
-    logger.info(
-        f"Scheduler started ({BROADCAST_HOUR:02d}:{BROADCAST_MINUTE:02d})"
-    )
-
-# -------------------------
+# --------------------------------
 # Main
-# -------------------------
+# --------------------------------
 
 def main():
 
     logger.info("Starting Telegram Bot...")
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
 
-    # -------------------------
+    # -----------------------------
     # User Commands
-    # -------------------------
+    # -----------------------------
 
     application.add_handler(
         CommandHandler("start", start)
@@ -354,9 +350,9 @@ def main():
         CommandHandler("more", more_command)
     )
 
-    # -------------------------
+    # -----------------------------
     # Admin Commands
-    # -------------------------
+    # -----------------------------
 
     application.add_handler(
         CommandHandler("setstart", set_start)
@@ -378,9 +374,9 @@ def main():
         CommandHandler("stats", stats)
     )
 
-    # -------------------------
+    # -----------------------------
     # Ignore Everything Else
-    # -------------------------
+    # -----------------------------
 
     application.add_handler(
         MessageHandler(
@@ -389,32 +385,50 @@ def main():
         )
     )
 
-    # -------------------------
-    # Start Scheduler
-    # -------------------------
+    # -----------------------------
+    # Daily Broadcast (JobQueue)
+    # -----------------------------
 
-    start_scheduler(application)
+    application.job_queue.run_daily(
+        daily_broadcast,
+        time=time(
+            hour=BROADCAST_HOUR,
+            minute=BROADCAST_MINUTE,
+        ),
+        name="daily_broadcast",
+    )
+
+    logger.info(
+        f"Daily broadcast scheduled at "
+        f"{BROADCAST_HOUR:02d}:{BROADCAST_MINUTE:02d}"
+    )
 
     logger.info("Bot is running...")
 
     application.run_polling(
-        drop_pending_updates=True
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
     )
 
 
-# -------------------------
+# --------------------------------
 # Entry Point
-# -------------------------
+# --------------------------------
 
 if __name__ == "__main__":
+
     try:
+
         main()
 
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
+
+        logger.info("Bot stopped.")
 
     except Exception as e:
+
         logger.exception(e)
 
     finally:
+
         db.close()
